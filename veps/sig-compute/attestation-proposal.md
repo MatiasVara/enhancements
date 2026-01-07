@@ -37,6 +37,11 @@ confidential VMs can certify that they are running on confidential HW.
 ## User Stories
 - As a VM user, I want to deploy VMs on a platform with TDX protection and be
   able to attest these VMs.
+- As a developer, I want to continue to be able to launch TDX VMs with out
+  setting up attestation for testing purposes.
+- As a cluster admin, I want to be to fail-fast by adding an addition check to
+  verify that QGS is setup correctly (i.e. the socket exists) before deploying
+  before deploying my TDX pods.
 
 ## Repos
 
@@ -58,30 +63,36 @@ configuration:
 We add a new top-level section in configuration for all TEE(Trusted Execution
 Environment)-related configuration items named `confidentialCompute`. We add a
 new section for tdx. The attestation section contains two attributes:
-`enforced` and `qgsSocketPath`. When `enforced` is true, KubeVirt shall require
-the socket to exist or it fails. When `enforced` is false, KubeVirt shall try
-to mount the UNIX socket only if it exists. If the socket does not exist,
-KubeVirt shall not fail. `qgsSocketPath` is an optional attribute that
-indicates the path to the UNIX socket. We implement a device plugin that mounts
-the UNIX socket depending on the enforced attribute.
+`enforced` and `qgsSocketPath`. When `enforced` is true, KubeVirt shall enforce
+that the QGS socket exists before scheduling any TDX pods. The enforcement
+mechanism is discussed later. Next, `qgsSocketPath` is an optional attribute 
+that indicates the path to the UNIX socket on the host.
 
-We introduce the TDX device plugin, i.e., `devices.kubevirt.io/tdx`, which runs
-on nodes and handles both TDX hardware capability advertisement and QGS socket
-management. This plugin replaces the current node-labeller for TDX detection.
-It relies on Kubernetes native extended resource scheduling for placement. The
-plugin checks for TDX hardware support in the same way node-labeller used to
-do. If it is supported, it advertises it as a resource:
-`devices.kubevirt.io/tdx`. During resource allocation the plugin probes for the
-QGS socket at the configured path. If the socket exists, it mounts it into the
-virt-launcher pod as a volume.
+We introduce the TDX device plugin, using the resource `devices.kubevirt.io/tdx`,
+which runs on each TDX capable node and handles both TDX hardware capability 
+advertisement and QGS socket mounting. This plugin replaces the current 
+node-labeller for TDX detection. It relies on Kubernetes native extended 
+resource scheduling for placement. The plugin checks for TDX hardware support 
+by checking for the existance of a `tdx` key in `/sys/fs/cgroup/misc.capacity`
+(which is added by the kernel given TDX support). Moreover, the value associated
+with the `tdx` key inside `misc.capacity` also reports the maximum number of 
+concurrent TDs supported by the hardware. Therefore, this file is also used to 
+derive the device capacity of the device plugin. 
+
+It should be noted that all mounts are unconditional. Mount points are created
+even if the QGS socket does not exist which allows attestation to function once
+the QGS socket is created even as the pod is running.
 
 The plugin's resource health is based on the cluster-wide
 confidentialCompute.tdx.attestation.enforced configuration:
 
 * If attestation is enforced: The resource is healthy only if the
   QGS socket is present. If the socket is missing, it becomes unhealthy and
-  enters a retry loop. This acts as a scheduling gate: TDX VMs requesting the
-  resource won't allocate until QGS is deployed.
+  enters a retry loop. This acts as a scheduling gate by ensuring that: (a) TDX 
+  VMs requesting the resource won't allocate until QGS is deployed. (b) If there 
+  are multiple nodes in the cluster supporting TDX hardware, but only some have 
+  attestation support via the QGS socket then the scheduler will only deploy TDX
+  pods to nodes that have the QGS socket configured.
 * If attestation is not enforced: The resource is always healthy if TDX hardware
   is available. QGS mounting is opportunistic - if the socket exists, it's
   mounted; otherwise, the VM starts without attestation.
@@ -148,8 +159,10 @@ to be merged without the e2e tests.
 ### Beta
 We expect e2e tests in Beta. We expect the API to be stable. We need to decide
 if we keep the path to the UNIX socket as an attribute or we remove it in favor
-of a default location. We need to re-evaluate whether there is any use case for
-having per-VMI enforcements.
+of a default location. Finally we need to re-evaluate whether there is any use 
+case for enforcing the existance of QGS on the KubeVirt side (i.e use of the 
+`attestation.enforced` field) and if so whether it makes sense to extend these 
+enforcements to support per-VMI enforcements (as opposed to only cluster-wide).
 
 ### GA
 Remove feature gate.
